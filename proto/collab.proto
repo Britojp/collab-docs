@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+package collabdocs.collab;
+
+option go_package = "github.com/britojp/collabdocs/go/gateway/gen/collab";
+option java_package = "br.ufg.collabdocs.proto";
+option java_multiple_files = true;
+
+import "google/protobuf/empty.proto";
+
+service CollabService {
+  rpc UpdatePresence(PresenceUpdate)     returns (google.protobuf.Empty);
+  rpc GetPresence(GetPresenceRequest)    returns (PresenceList);
+  rpc StreamPresence(GetPresenceRequest) returns (stream PresenceUpdate);
+}
+
+message CursorPos { int32 line = 1; int32 column = 2; }
+
+message PresenceUpdate {
+  string    doc_id    = 1;
+  string    user_id   = 2;
+  string    user_name = 3;
+  string    color     = 4;
+  CursorPos cursor    = 5;
+  int64     timestamp = 6;
+}
+
+message GetPresenceRequest { string doc_id = 1; }
+message PresenceList       { repeated PresenceUpdate users = 1; }

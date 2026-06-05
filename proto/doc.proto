@@ -1,0 +1,53 @@
+syntax = "proto3";
+
+package collabdocs.doc;
+
+option go_package = "github.com/britojp/collabdocs/go/gateway/gen/doc";
+option java_package = "br.ufg.collabdocs.proto";
+option java_multiple_files = true;
+
+import "google/protobuf/empty.proto";
+
+service DocService {
+  rpc GetDocument(GetDocumentRequest)       returns (Document);
+  rpc CreateDocument(CreateDocumentRequest) returns (Document);
+  rpc DeleteDocument(DeleteDocumentRequest) returns (google.protobuf.Empty);
+  rpc ApplyOperation(Operation)             returns (OperationResult);
+  rpc GetHistory(HistoryRequest)            returns (stream OperationEntry);
+}
+
+message Document {
+  string id         = 1;
+  string title      = 2;
+  string owner_id   = 3;
+  string content    = 4;
+  int64  created_at = 5;
+  int64  updated_at = 6;
+}
+
+message GetDocumentRequest    { string doc_id = 1; }
+message CreateDocumentRequest { string title = 1; string owner_id = 2; }
+message DeleteDocumentRequest { string doc_id = 1; }
+
+message NodeID { string agent = 1; int32 seq = 2; }
+
+message Operation {
+  string             id           = 1;
+  string             doc_id       = 2;
+  string             user_id      = 3;
+  string             type         = 4;
+  NodeID             node_id      = 5;
+  NodeID             after_id     = 6;
+  string             character    = 7;
+  map<string, int32> vector_clock = 8;
+  int64              timestamp    = 9;
+}
+
+message OperationResult { bool success = 1; string error = 2; }
+
+message HistoryRequest {
+  string             doc_id             = 1;
+  map<string, int32> since_vector_clock = 2;
+}
+
+message OperationEntry { Operation operation = 1; }
