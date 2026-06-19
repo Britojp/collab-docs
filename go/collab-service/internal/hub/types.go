@@ -23,7 +23,7 @@ type ServerMessage struct {
 	UserID        string        `json:"userId,omitempty"`
 	Name          string        `json:"name,omitempty"`
 	Op            *Op           `json:"op,omitempty"`
-	Content       string        `json:"content,omitempty"`
+	Content       string        `json:"content"`
 	Line          int           `json:"line,omitempty"`
 	Col           int           `json:"col,omitempty"`
 	Users         []PresenceUser `json:"users,omitempty"`
