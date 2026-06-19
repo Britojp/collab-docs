@@ -1,38 +1,26 @@
-docs/
-.env
-.env.local
-
 # Go
-*.exe
-*.exe~
-*.dll
-*.so
-*.dylib
-*.test
-*.out
-vendor/
+go/*/go.sum
+go/**/vendor/
+go/**/*.test
+go/**/tmp/
 
-# Java / Maven
-target/
-*.class
-*.jar
-*.war
-*.ear
-!**/src/main/**/target/
-!**/src/test/**/target/
-*.iml
+# Java
+java/**/.mvn/
+java/**/target/
+java/**/*.class
+java/**/*.jar
+java/**/*.war
+
+# Node / Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.env.local
+
+# Environment
+.env
+*.env
+
+# IDE
 .idea/
-.classpath
-.project
-.settings/
-.mvn/wrapper/maven-wrapper.jar
-
-# Node
-node_modules/
-dist/
-build/
-.next/
-
-# OS
+*.iml
 .DS_Store
-Thumbs.db
