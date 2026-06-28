@@ -50,13 +50,26 @@ services:
       SPRING_RABBITMQ_USERNAME: collabdocs
       SPRING_RABBITMQ_PASSWORD: collabdocs
       JWT_SECRET: ${JWT_SECRET:-collabdocs-dev-secret-key-32chars!!}
+      GRPC_SERVER_PORT: 9090
     ports:
       - "8081:8081"
+      - "9090:9090"
     depends_on:
       postgres:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
+
+  grpc-web:
+    image: envoyproxy/envoy:v1.30-latest
+    restart: unless-stopped
+    volumes:
+      - ./envoy/envoy.yaml:/etc/envoy/envoy.yaml:ro
+    ports:
+      - "8082:8082"
+    depends_on:
+      java-backend:
+        condition: service_started
 
   go-collab:
     build:
@@ -83,6 +96,7 @@ services:
       - "4000:80"
     depends_on:
       - go-collab
+      - grpc-web
 
 volumes:
   postgres_data:
