@@ -12,7 +12,8 @@ Projeto desenvolvido para a disciplina **Sistemas Concorrentes e Distribuídos �
 |--------|-------|
 | Frontend | React 18 + TypeScript + Vite + nginx |
 | Serviço de tempo real | Go 1.22 + Gin + gorilla/websocket |
-| Backend / API | Java 21 + Spring Boot 3.3 + Spring AMQP |
+| Backend / API / Analytics | Java 21 + Spring Boot 3.3 + Spring AMQP + gRPC |
+| Gateway gRPC-Web | Envoy |
 | Mensageria | RabbitMQ 3.13 |
 | Banco de dados | PostgreSQL 16 |
 
@@ -23,7 +24,7 @@ Projeto desenvolvido para a disciplina **Sistemas Concorrentes e Distribuídos �
 ### Pré-requisitos
 
 - [Docker](https://docs.docker.com/get-docker/) e Docker Compose instalados
-- Portas **4000**, **8080**, **8081**, **5432** e **15672** disponíveis no host
+- Portas **4000**, **8080**, **8081**, **8082**, **9090**, **5432**, **5672** e **15672** disponíveis no host
 
 ### 1. Clone o repositório
 
@@ -38,7 +39,13 @@ cd collab-docs
 docker compose -f infra/docker-compose.yml up -d --build
 ```
 
-O primeiro build leva alguns minutos (Maven baixa dependências Java, npm instala pacotes). Os próximos sobem em segundos.
+O primeiro build leva alguns minutos: Maven baixa dependências Java e gera classes gRPC a partir de `src/main/proto`, npm instala pacotes do frontend e Docker puxa a imagem do Envoy. Os próximos builds usam cache e sobem bem mais rápido.
+
+Se quiser apenas validar o build sem iniciar containers:
+
+```bash
+docker compose -f infra/docker-compose.yml build
+```
 
 ### 3. Aguarde os serviços ficarem prontos
 
@@ -46,7 +53,7 @@ O primeiro build leva alguns minutos (Maven baixa dependências Java, npm instal
 docker compose -f infra/docker-compose.yml ps
 ```
 
-Todos devem estar com status `running`. O Java Backend pode levar ~20s para iniciar após o PostgreSQL ficar healthy.
+Todos devem estar com status `running`. O Java Backend pode levar ~20s para iniciar após o PostgreSQL ficar healthy. A stack atual sobe 6 serviços: `postgres`, `rabbitmq`, `java-backend`, `grpc-web`, `go-collab` e `frontend`.
 
 ### 4. Acesse a aplicação
 
@@ -55,7 +62,11 @@ Todos devem estar com status `running`. O Java Backend pode levar ~20s para inic
 | Aplicação (frontend) | http://localhost:4000 |
 | RabbitMQ Management | http://localhost:15672 (user: `collabdocs` / senha: `collabdocs`) |
 | Java Backend (direto) | http://localhost:8081 |
+| Java gRPC (direto) | localhost:9090 |
+| Envoy gRPC-Web | http://localhost:8082 |
 | Go Collab Service (direto) | http://localhost:8080 |
+
+No navegador, o frontend acessa analytics por `/grpc/*`; o nginx encaminha para o Envoy, e o Envoy traduz gRPC-Web para o gRPC nativo do Java.
 
 ### 5. Login
 
@@ -77,8 +88,11 @@ Para testar a colaboração com dois usuários, use a opção **Cadastre-se** na
 3. Crie um documento em uma das janelas — ele aparecerá na sidebar de ambas
 4. Abra o mesmo documento nos dois navegadores
 5. Digite em um e observe as alterações aparecendo no outro em tempo real
+6. Observe na barra superior o grupo **Analytics** com `chars`, palavras, linhas, parágrafos e versão, atualizados via gRPC-Web
 
 > Usar dois navegadores diferentes (ou um em modo incógnito) é necessário porque o `localStorage` é compartilhado entre abas do mesmo navegador.
+
+As métricas de analytics têm consistência eventual: o Go aplica a edição em tempo real, publica a operação no RabbitMQ, o Java persiste a operação em `documents.content` e o frontend consulta o Java via gRPC-Web.
 
 ---
 
@@ -91,6 +105,8 @@ docker compose -f infra/docker-compose.yml down
 # Para e remove todos os dados (volumes)
 docker compose -f infra/docker-compose.yml down -v
 ```
+
+Use `down -v` quando quiser recriar o PostgreSQL e RabbitMQ do zero. Isso remove documentos, usuários criados manualmente, histórico de operações, métricas e filas persistidas.
 
 ---
 
@@ -105,9 +121,11 @@ collab-docs/
 ├── go/
 │   └── collab-service/       # Serviço Go (proxy + WebSocket hub)
 ├── java/
-│   └── backend/              # Spring Boot (auth, docs, workers AMQP)
+│   └── backend/              # Spring Boot (auth, docs, workers AMQP, analytics gRPC)
 ├── infra/
 │   ├── docker-compose.yml    # Orquestração de todos os serviços
+│   ├── envoy/
+│   │   └── envoy.yaml        # Proxy gRPC-Web → gRPC Java
 │   └── postgres/
 │       ├── init.sql          # Schema do banco
 │       └── seed.sql          # Dados iniciais (usuário admin)
