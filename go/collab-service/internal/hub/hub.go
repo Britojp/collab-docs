@@ -46,11 +46,12 @@ type Hub struct {
 	status            chan statusRequest
 }
 
-func newHub(docID, content string, pub *mq.Publisher, bus replication.Bus) *Hub {
+func newHub(docID, content string, version int, pub *mq.Publisher, bus replication.Bus) *Hub {
 	h := &Hub{
 		docID:      docID,
 		clients:    make(map[*Client]bool),
 		content:    content,
+		version:    version,
 		ops:        make([]Op, 0, 64),
 		register:   make(chan *Client, 16),
 		unregister: make(chan *Client, 16),

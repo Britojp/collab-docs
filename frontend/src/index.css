@@ -431,6 +431,37 @@ input, textarea {
   flex-shrink: 0;
 }
 
+.analytics-strip {
+  min-width: 0;
+  max-width: min(640px, 58vw);
+  height: 28px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0 9px;
+  margin-right: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.analytics-strip-label {
+  color: var(--text);
+  font-weight: 650;
+  padding-right: 2px;
+}
+
+.analytics-strip span:not(.analytics-strip-label) {
+  flex-shrink: 0;
+}
+
+.analytics-strip:hover {
+  background: var(--sidebar-hover);
+}
+
 .editor-scroll {
   flex: 1;
   overflow-y: auto;
@@ -481,18 +512,6 @@ input, textarea {
 }
 
 .editor-body::placeholder { color: var(--text-secondary); opacity: .4; }
-
-/* ── Metrics badge ──────────────────────────────────────── */
-.metrics-badge {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  font-size: 12px;
-  color: var(--text-secondary);
-  padding-right: 4px;
-}
-
-.metrics-badge span { white-space: nowrap; }
 
 @keyframes collab-blink {
   0%, 100% { opacity: 1; }

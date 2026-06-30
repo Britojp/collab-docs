@@ -2,6 +2,7 @@ package br.ufg.collabdocs.document;
 
 import br.ufg.collabdocs.document.dto.CreateDocumentRequest;
 import br.ufg.collabdocs.document.dto.DocumentResponse;
+import br.ufg.collabdocs.operation.OpEvent;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -65,47 +66,66 @@ public class DocumentService {
     }
 
     @Transactional
-    public void applyOperation(UUID id, String type, int position, String character, int version) {
-        docs.findById(id).ifPresent(doc -> {
-            if (version <= doc.getVersion()) {
-                return;
-            }
+    public void applyOperation(OpEvent event) {
+        UUID docId = UUID.fromString(event.docId());
+        Document doc = docs.findById(docId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND));
 
-            var content = doc.getContent() == null ? "" : doc.getContent();
-            doc.setContent(apply(content, type, position, character));
-            doc.setVersion(version);
+        if (event.version() <= doc.getVersion()) {
+            return;
+        }
+        if (event.version() != doc.getVersion() + 1) {
+            if (event.content() == null) {
+                throw new IllegalStateException("operation version gap for document " + docId
+                        + ": current=" + doc.getVersion() + " event=" + event.version());
+            }
+            doc.setContent(event.content());
+            doc.setVersion(event.version());
             doc.setUpdatedAt(LocalDateTime.now());
             docs.save(doc);
-        });
+            return;
+        }
+
+        String content = doc.getContent() == null ? "" : doc.getContent();
+        String updated;
+        try {
+            updated = switch (event.normalizedType()) {
+                case "insert" -> insertAt(content, event.pos(), event.character());
+                case "delete" -> deleteAt(content, event.pos());
+                default -> throw new IllegalArgumentException("unsupported operation type: " + event.type());
+            };
+        } catch (IllegalArgumentException e) {
+            if (event.content() == null) {
+                throw e;
+            }
+            updated = event.content();
+        }
+
+        doc.setContent(updated);
+        doc.setVersion(event.version());
+        doc.setUpdatedAt(LocalDateTime.now());
+        docs.save(doc);
     }
 
-    private String apply(String content, String type, int position, String character) {
-        var codePoints = content.codePoints().toArray();
-        var pos = Math.max(0, Math.min(position, codePoints.length));
-
-        if ("insert".equals(type)) {
-            if (character == null || character.isEmpty()) {
-                return content;
-            }
-            var inserted = character.codePointAt(0);
-            var next = new int[codePoints.length + 1];
-            System.arraycopy(codePoints, 0, next, 0, pos);
-            next[pos] = inserted;
-            System.arraycopy(codePoints, pos, next, pos + 1, codePoints.length - pos);
-            return new String(next, 0, next.length);
+    private String insertAt(String content, int pos, String character) {
+        if (character == null || character.isEmpty()) {
+            throw new IllegalArgumentException("insert operation requires character");
         }
+        int safePos = requirePosition(pos, 0, content.length(), "insert");
+        String ch = character.substring(0, 1);
+        return content.substring(0, safePos) + ch + content.substring(safePos);
+    }
 
-        if ("delete".equals(type)) {
-            if (pos >= codePoints.length) {
-                return content;
-            }
-            var next = new int[codePoints.length - 1];
-            System.arraycopy(codePoints, 0, next, 0, pos);
-            System.arraycopy(codePoints, pos + 1, next, pos, codePoints.length - pos - 1);
-            return new String(next, 0, next.length);
+    private String deleteAt(String content, int pos) {
+        int safePos = requirePosition(pos, 0, content.length() - 1, "delete");
+        return content.substring(0, safePos) + content.substring(safePos + 1);
+    }
+
+    private int requirePosition(int pos, int min, int max, String operation) {
+        if (pos < min || pos > max) {
+            throw new IllegalArgumentException(operation + " position out of bounds: " + pos);
         }
-
-        return content;
+        return pos;
     }
 
     private DocumentResponse toResponse(Document d) {

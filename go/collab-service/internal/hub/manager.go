@@ -47,36 +47,39 @@ func (m *Manager) GetOrCreate(docID string) *Hub {
 		return h
 	}
 
-	content := m.fetchContent(docID)
-	h := newHub(docID, content, m.pub, m.bus)
+	snapshot := m.fetchSnapshot(docID)
+	h := newHub(docID, snapshot.Content, snapshot.Version, m.pub, m.bus)
 	m.hubs[docID] = h
 	go h.run()
-	log.Printf("manager: started hub for doc %s", docID)
+	log.Printf("manager: started hub for doc %s at version %d", docID, snapshot.Version)
 	return h
 }
 
-// fetchContent loads the current document snapshot from Java.
-func (m *Manager) fetchContent(docID string) string {
+type documentSnapshot struct {
+	Content string `json:"content"`
+	Version int    `json:"version"`
+}
+
+// fetchSnapshot loads the current document snapshot from Java.
+func (m *Manager) fetchSnapshot(docID string) documentSnapshot {
 	url := fmt.Sprintf("%s/internal/documents/%s/content", m.javaBaseURL, docID)
 	resp, err := http.Get(url)
 	if err != nil {
 		log.Printf("manager: fetch content %s: %v", docID, err)
-		return ""
+		return documentSnapshot{}
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		log.Printf("manager: fetch content %s status %d: %s", docID, resp.StatusCode, body)
-		return ""
+		return documentSnapshot{}
 	}
 
-	var result struct {
-		Content string `json:"content"`
-	}
+	var result documentSnapshot
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		log.Printf("manager: decode content %s: %v", docID, err)
-		return ""
+		return documentSnapshot{}
 	}
-	return result.Content
+	return result
 }

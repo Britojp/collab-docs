@@ -6,6 +6,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.UUID;
 
@@ -23,15 +24,11 @@ public class OperationConsumer {
     }
 
     @RabbitListener(queues = RabbitMQConfig.Q_PERSIST)
+    @Transactional
     public void onOperation(OpEvent event) {
         try {
             repository.save(Operation.from(event));
-            documents.applyOperation(
-                    UUID.fromString(event.docId()),
-                    event.type(),
-                    event.pos(),
-                    event.character(),
-                    event.version());
+            documents.applyOperation(event);
             log.debug("persisted op doc={} v={} type={}", event.docId(), event.version(), event.type());
         } catch (Exception e) {
             log.error("failed to persist op: {}", e.getMessage());

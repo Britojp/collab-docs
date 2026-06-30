@@ -23,3 +23,10 @@ frontend/.env.local
 .idea/
 *.iml
 .DS_Store
+.vscode
+
+# Agent
+.agents
+.codex
+.claude
+.ai

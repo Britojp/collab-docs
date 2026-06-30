@@ -34,7 +34,7 @@ public class Operation {
         var op = new Operation();
         op.docId = UUID.fromString(ev.docId());
         try { op.userId = UUID.fromString(ev.userId()); } catch (Exception ignored) {}
-        op.type = ev.type();
+        op.type = ev.normalizedType();
         op.position = ev.pos();
         op.character = ev.character();
         op.serverVersion = ev.version();

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import { useNavigate, useParams } from 'react-router-dom'
 import Sidebar from '../components/Sidebar'
 import { useWebSocket, ServerMsg, Op } from '../hooks/useWebSocket'
-import { api, Metrics } from '../services/api'
+import { api, DocumentAnalytics } from '../services/api'
 
 interface PresenceUser { id: string; name: string }
 
@@ -24,7 +24,7 @@ export default function EditorPage() {
   const [content, setContent] = useState('')
   const [docTitle, setDocTitle] = useState('Carregando...')
   const [users, setUsers] = useState<PresenceUser[]>([])
-  const [metrics, setMetrics] = useState<Metrics | null>(null)
+  const [analytics, setAnalytics] = useState<DocumentAnalytics | null>(null)
   const [cursors, setCursors] = useState<Map<string, RemoteCursor>>(new Map())
   const myId = localStorage.getItem('userId') ?? ''
 
@@ -55,9 +55,9 @@ export default function EditorPage() {
 
   useEffect(() => {
     if (!docId) return
-    const load = () => api.getMetrics(docId).then(setMetrics).catch(() => {})
+    const load = () => api.getDocumentAnalytics(docId).then(setAnalytics).catch(() => {})
     load()
-    const t = setInterval(load, 10_000)
+    const t = setInterval(load, 5_000)
     return () => clearInterval(t)
   }, [docId])
 
@@ -142,11 +142,14 @@ export default function EditorPage() {
 
       <div className="editor-area">
         <div className="editor-topbar">
-          {metrics && (
-            <div className="metrics-badge">
-              <span title="Total de operações">⚡ {metrics.totalOps.toLocaleString()} ops</span>
-              <span title="Caracteres inseridos">+{metrics.charsInserted.toLocaleString()}</span>
-              <span title="Caracteres removidos">−{metrics.charsDeleted.toLocaleString()}</span>
+          {analytics && (
+            <div className="analytics-strip" title="Analytics do conteúdo persistido">
+              <span className="analytics-strip-label">Analytics</span>
+              <span>{analytics.charCount.toLocaleString()} chars</span>
+              <span>{analytics.wordCount.toLocaleString()} palavras</span>
+              <span>{analytics.lineCount.toLocaleString()} linhas</span>
+              <span>{analytics.paragraphCount.toLocaleString()} parágrafos</span>
+              <span>v{analytics.version.toLocaleString()}</span>
             </div>
           )}
 

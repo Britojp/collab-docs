@@ -46,7 +46,10 @@ public class DocumentController {
 
     // Internal endpoint called by the Go Hub Manager to load document content on hub creation.
     @GetMapping("/internal/documents/{id}/content")
-    public Map<String, String> getContent(@PathVariable UUID id) {
-        return Map.of("content", service.getContent(id));
+    public Map<String, Object> getContent(@PathVariable UUID id) {
+        DocumentResponse doc = service.getById(id);
+        return Map.of(
+                "content", doc.content(),
+                "version", doc.version());
     }
 }

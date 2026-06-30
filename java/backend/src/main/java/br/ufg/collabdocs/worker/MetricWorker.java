@@ -36,9 +36,9 @@ public class MetricWorker {
         });
 
         m.setTotalOps(m.getTotalOps() + 1);
-        if ("insert".equals(event.type())) {
+        if ("insert".equals(event.normalizedType())) {
             m.setCharsInserted(m.getCharsInserted() + 1);
-        } else if ("delete".equals(event.type())) {
+        } else if ("delete".equals(event.normalizedType())) {
             m.setCharsDeleted(m.getCharsDeleted() + 1);
         }
         m.setLastActivity(LocalDateTime.now());

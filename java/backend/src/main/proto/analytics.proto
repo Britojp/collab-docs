@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+package analytics;
+
+option java_multiple_files = true;
+option java_package = "br.ufg.collabdocs.analytics.proto";
+option java_outer_classname = "AnalyticsProto";
+
+service AnalyticsService {
+  rpc GetDocumentAnalytics (DocumentAnalyticsRequest) returns (DocumentAnalyticsResponse);
+}
+
+message DocumentAnalyticsRequest {
+  string doc_id = 1;
+}
+
+message DocumentAnalyticsResponse {
+  string doc_id = 1;
+  int64 char_count = 2;
+  int64 word_count = 3;
+  int64 line_count = 4;
+  int64 paragraph_count = 5;
+  int32 version = 6;
+  string last_activity = 7;
+}
