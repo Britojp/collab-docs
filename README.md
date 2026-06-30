@@ -176,6 +176,7 @@ collab-docs/
 ├── docs/
 │   ├── application.puml      # Diagrama PlantUML da aplicação
 │   ├── architecture.md       # Arquitetura detalhada do sistema
+│   ├── requirements.md       # Requisitos funcionais e não funcionais do cenário
 │   ├── development-status.md # Relatório de desenvolvimento
 │   ├── failover-test.md      # Teste de failover de liderança (runtime)
 │   └── tests.md              # Guia central de testes
@@ -203,6 +204,7 @@ collab-docs/
 
 ## Documentação
 
+- [Requisitos do cenário](docs/requirements.md)
 - [Arquitetura do sistema](docs/architecture.md)
 - [Relatório de desenvolvimento](docs/development-status.md)
 - [Testes do projeto](docs/tests.md)
