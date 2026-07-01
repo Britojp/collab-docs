@@ -25,6 +25,13 @@ export default function EditorPage() {
   const navigate = useNavigate()
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const contentRef = useRef('')
+  // Tracks this client's own caret synchronously, independent of the DOM and
+  // of React's render/paint timing. See handleMessage's 'op' case for why —
+  // reading ta.selectionStart at each incoming op raced with the previous
+  // op's deferred correction when several arrived within one animation
+  // frame (e.g. the other user typing fast), making the local caret drift
+  // toward wherever the remote edits landed.
+  const myCursorRef = useRef({ start: 0, end: 0 })
   const [content, setContent] = useState('')
   const [docTitle, setDocTitle] = useState('Carregando...')
   const [users, setUsers] = useState<PresenceUser[]>([])
@@ -35,6 +42,16 @@ export default function EditorPage() {
   const myId = localStorage.getItem('userId') ?? ''
 
   useEffect(() => { contentRef.current = content }, [content])
+
+  // Re-apply the tracked caret after every content change (ours or a
+  // remote op) — synchronously, before paint, so the browser never shows an
+  // intermediate/incorrect position.
+  useLayoutEffect(() => {
+    const ta = textareaRef.current
+    if (!ta) return
+    ta.selectionStart = myCursorRef.current.start
+    ta.selectionEnd = myCursorRef.current.end
+  }, [content])
 
   useEffect(() => {
     if (!docId) return
@@ -70,28 +87,26 @@ export default function EditorPage() {
   const handleMessage = useCallback((msg: ServerMsg) => {
     switch (msg.type) {
       case 'resync':
+        // Content is fully replaced; any position we were tracking is
+        // meaningless against the new text, so reset to the start.
+        myCursorRef.current = { start: 0, end: 0 }
         setContent(msg.content ?? '')
         setCursors(new Map())
         break
 
       case 'op': {
         if (!msg.op) { console.warn('[editor] op message missing op field', msg); break }
-        const ta = textareaRef.current
-        const savedStart = ta?.selectionStart ?? 0
-        const savedEnd = ta?.selectionEnd ?? 0
 
-        setContent(prev => {
-          const next = applyOp(prev, msg.op!)
-          if (ta) {
-            const newStart = adjustCursor(savedStart, msg.op!)
-            const newEnd = adjustCursor(savedEnd, msg.op!)
-            requestAnimationFrame(() => {
-              ta.selectionStart = newStart
-              ta.selectionEnd = newEnd
-            })
-          }
-          return next
-        })
+        // Adjust from the ref's own current value — never re-read from the
+        // DOM here. Several remote ops can arrive before the browser paints
+        // once, so each adjustment must chain off the previous one instead
+        // of a possibly-stale ta.selectionStart snapshot.
+        myCursorRef.current = {
+          start: adjustCursor(myCursorRef.current.start, msg.op),
+          end: adjustCursor(myCursorRef.current.end, msg.op),
+        }
+
+        setContent(prev => applyOp(prev, msg.op!))
 
         // Adjust all remote cursor positions for the incoming op
         setCursors(prev => {
@@ -144,12 +159,32 @@ export default function EditorPage() {
     const newVal = e.target.value
     const old = contentRef.current
     const ops = diffToOps(old, newVal)
+    // The browser already placed the caret correctly for what the user just
+    // typed — record it as the new baseline before the layout effect re-syncs.
+    myCursorRef.current = { start: e.target.selectionStart, end: e.target.selectionEnd }
     setContent(newVal)
+
+    // Our own edits shift the shared buffer just as much as a remote op
+    // does — remote cursors and highlight markers rendered against our
+    // content must stay aligned, or they visibly lag behind every
+    // character we type until that user's next cursor update overwrites it.
+    for (const op of ops) {
+      setCursors(prev => {
+        const m = new Map(prev)
+        for (const [id, cur] of m) {
+          m.set(id, { ...cur, pos: adjustCursor(cur.pos, op) })
+        }
+        return m
+      })
+      setHighlights(prev => prev.map(h => ({ ...h, pos: adjustCursor(h.pos, op) })))
+    }
+
     ops.forEach(op => sendOp(op))
     sendCursor(e.target.selectionStart)
   }
 
   function handleCursorMove(e: React.SyntheticEvent<HTMLTextAreaElement>) {
+    myCursorRef.current = { start: e.currentTarget.selectionStart, end: e.currentTarget.selectionEnd }
     sendCursor(e.currentTarget.selectionStart)
   }
 

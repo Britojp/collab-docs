@@ -353,6 +353,147 @@ func TestBroadcastPresencePublishesLocalRosterToBus(t *testing.T) {
 	}
 }
 
+// Fencing: a node whose h.isLeader is stale (it was paused/partitioned past
+// the lease TTL and another node has since taken over) must not keep
+// advancing the document on its own once it notices the epoch has moved on.
+
+func TestStaleLeaderIsFencedOutOnEpochMismatch(t *testing.T) {
+	bus := newFakeBus("node-a")
+	h := newHub("doc-1", "a", 0, nil, bus)
+	h.version = 1
+	h.isLeader = true
+	h.leaderEpoch = 1
+
+	// Someone else re-acquired leadership while this node was paused —
+	// Redis's epoch counter has moved on without this node knowing.
+	bus.epoch = 2
+
+	origin := newTestClient("client-1", "user-1")
+	h.clients[origin] = true
+
+	h.handleProposal(replication.Proposal{
+		DocID:          "doc-1",
+		OriginNodeID:   bus.NodeID(),
+		OriginClientID: origin.id,
+		UserID:         origin.userID,
+		ClientVersion:  1,
+		Op:             replication.Operation{Type: "insert", Pos: 1, Char: "z"},
+	})
+
+	if h.content != "a" {
+		t.Fatalf("content = %q, want unchanged %q — a fenced-out node must not apply anything", h.content, "a")
+	}
+	if h.version != 1 {
+		t.Fatalf("version = %d, want unchanged 1", h.version)
+	}
+	if h.isLeader {
+		t.Fatal("node should have stepped down after detecting it was fenced out")
+	}
+	if len(bus.commits) != 0 {
+		t.Fatalf("commits published = %d, want 0 — nothing should have been published", len(bus.commits))
+	}
+	assertNoMessage(t, origin.send)
+}
+
+func TestLeaderProceedsWhenEpochStillCurrent(t *testing.T) {
+	bus := newFakeBus("node-a")
+	h := newHub("doc-1", "", 0, nil, bus)
+	h.isLeader = true
+	h.leaderEpoch = 1
+	bus.epoch = 1 // still the current, uncontested term
+
+	origin := newTestClient("client-1", "user-1")
+	h.clients[origin] = true
+
+	h.handleProposal(replication.Proposal{
+		DocID:          "doc-1",
+		OriginNodeID:   bus.NodeID(),
+		OriginClientID: origin.id,
+		UserID:         origin.userID,
+		ClientVersion:  0,
+		Op:             replication.Operation{Type: "insert", Pos: 0, Char: "a"},
+	})
+
+	if h.content != "a" {
+		t.Fatalf("content = %q, want %q", h.content, "a")
+	}
+	if !h.isLeader {
+		t.Fatal("node should still consider itself leader when its epoch matches Redis's")
+	}
+	if len(bus.commits) != 1 || bus.commits[0].Epoch != 1 {
+		t.Fatalf("commits = %#v, want one commit with epoch 1", bus.commits)
+	}
+}
+
+func TestFollowerRejectsCommitFromStaleEpoch(t *testing.T) {
+	bus := newFakeBus("node-b")
+	h := newHub("doc-1", "hello", 0, nil, bus)
+	h.version = 1
+	h.highestSeenEpoch = 2 // already heard from the current (newer) leader
+
+	peer := newTestClient("client-2", "user-2")
+	h.clients[peer] = true
+
+	// A commit from the OLD leader's epoch 1, delayed in flight and arriving
+	// only now — must be dropped even though its version looks plausible.
+	h.handleCommit(replication.Commit{
+		DocID:         "doc-1",
+		OriginNodeID:  "node-a",
+		ServerVersion: 2,
+		Epoch:         1,
+		Op:            replication.Operation{Type: "insert", Pos: 5, Char: "x"},
+	})
+
+	if h.content != "hello" {
+		t.Fatalf("content = %q, want unchanged %q", h.content, "hello")
+	}
+	if h.version != 1 {
+		t.Fatalf("version = %d, want unchanged 1", h.version)
+	}
+	assertNoMessage(t, peer.send)
+}
+
+func TestFollowerAcceptsCommitFromNewerEpochAndRaisesFloor(t *testing.T) {
+	bus := newFakeBus("node-b")
+	h := newHub("doc-1", "hello", 0, nil, bus)
+	h.version = 1
+	h.highestSeenEpoch = 1
+
+	peer := newTestClient("client-2", "user-2")
+	h.clients[peer] = true
+
+	h.handleCommit(replication.Commit{
+		DocID:         "doc-1",
+		OriginNodeID:  "node-a",
+		ServerVersion: 2,
+		Epoch:         2,
+		Op:            replication.Operation{Type: "insert", Pos: 5, Char: "!"},
+	})
+
+	if h.content != "hello!" {
+		t.Fatalf("content = %q, want %q", h.content, "hello!")
+	}
+	if h.highestSeenEpoch != 2 {
+		t.Fatalf("highestSeenEpoch = %d, want 2", h.highestSeenEpoch)
+	}
+
+	// A later, delayed commit from the now-stale epoch 1 must be rejected.
+	h.handleCommit(replication.Commit{
+		DocID:         "doc-1",
+		OriginNodeID:  "node-a",
+		ServerVersion: 3,
+		Epoch:         1,
+		Op:            replication.Operation{Type: "insert", Pos: 0, Char: "X"},
+	})
+
+	if h.content != "hello!" {
+		t.Fatalf("content = %q, want unchanged %q after stale-epoch commit", h.content, "hello!")
+	}
+	if h.version != 2 {
+		t.Fatalf("version = %d, want unchanged 2 after stale-epoch commit", h.version)
+	}
+}
+
 func newTestClient(id, userID string) *Client {
 	return &Client{
 		id:     id,
@@ -395,6 +536,7 @@ type fakeBus struct {
 	resyncResponses []replication.ResyncResponse
 	cursors         []replication.CursorUpdate
 	presenceSnaps   []replication.PresenceSnapshot
+	epoch           int64 // simulates Redis's persistent epoch counter for the doc
 }
 
 func newFakeBus(nodeID string) *fakeBus {
@@ -452,8 +594,11 @@ func (b *fakeBus) PublishPresence(_ context.Context, snapshot replication.Presen
 	return nil
 }
 
-func (b *fakeBus) TryAcquireLeadership(context.Context, string, time.Duration) (bool, error) {
-	return true, nil
+func (b *fakeBus) TryAcquireLeadership(context.Context, string, time.Duration) (bool, int64, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.epoch++
+	return true, b.epoch, nil
 }
 
 func (b *fakeBus) RenewLeadership(context.Context, string, time.Duration) (bool, error) {
@@ -462,6 +607,12 @@ func (b *fakeBus) RenewLeadership(context.Context, string, time.Duration) (bool,
 
 func (b *fakeBus) GetLeader(context.Context, string) (string, error) {
 	return b.nodeID, nil
+}
+
+func (b *fakeBus) CurrentEpoch(context.Context, string) (int64, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.epoch, nil
 }
 
 func (b *fakeBus) Close() error {

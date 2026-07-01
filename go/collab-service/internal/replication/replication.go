@@ -30,12 +30,18 @@ type Proposal struct {
 // Every Go instance applies commits to its local Hub state and broadcasts them
 // only to the WebSocket clients connected to that instance.
 type Commit struct {
-	DocID          string    `json:"docId"`
-	OriginNodeID   string    `json:"originNodeId"`
-	OriginClientID string    `json:"originClientId"`
-	UserID         string    `json:"userId"`
-	ServerVersion  int       `json:"serverVersion"`
-	Op             Operation `json:"op"`
+	DocID          string `json:"docId"`
+	OriginNodeID   string `json:"originNodeId"`
+	OriginClientID string `json:"originClientId"`
+	UserID         string `json:"userId"`
+	ServerVersion  int    `json:"serverVersion"`
+	// Epoch identifies the leadership term that produced this commit. A
+	// follower drops any commit whose epoch is older than the newest one it
+	// has already seen — the fencing mechanism that keeps a leader who
+	// resumes after being paused/partitioned past the lease TTL from
+	// corrupting the document once a newer leader has taken over.
+	Epoch int64     `json:"epoch"`
+	Op    Operation `json:"op"`
 }
 
 // ResyncRequest is sent by a follower when it detects a version gap, asking
@@ -129,11 +135,19 @@ type Bus interface {
 	// PublishPresence fans out this node's local roster for a document so
 	// other nodes can merge it into their own presence broadcasts.
 	PublishPresence(ctx context.Context, snapshot PresenceSnapshot) error
-	TryAcquireLeadership(ctx context.Context, docID string, ttl time.Duration) (bool, error)
+	// TryAcquireLeadership attempts to become the single writer for a
+	// document. On success it also returns a monotonically increasing epoch
+	// identifying this leadership term, used to fence out a former leader
+	// that resumes after being paused/partitioned past the lease TTL.
+	TryAcquireLeadership(ctx context.Context, docID string, ttl time.Duration) (bool, int64, error)
 	RenewLeadership(ctx context.Context, docID string, ttl time.Duration) (bool, error)
 	// GetLeader returns the node ID currently holding the document lock in Redis.
 	// An empty string means no leader is registered (yet or after TTL expiry).
 	GetLeader(ctx context.Context, docID string) (string, error)
+	// CurrentEpoch returns the latest leadership epoch recorded for a
+	// document. A leader checks this right before applying a proposal to
+	// verify it hasn't been superseded since it last acquired leadership.
+	CurrentEpoch(ctx context.Context, docID string) (int64, error)
 	Close() error
 }
 

@@ -137,19 +137,22 @@ func TestRedisBusLeadershipLockIsExclusiveAndRenewable(t *testing.T) {
 	defer follower.Close()
 
 	ctx := context.Background()
-	ok, err := leader.TryAcquireLeadership(ctx, "doc-1", time.Minute)
+	ok, epoch, err := leader.TryAcquireLeadership(ctx, "doc-1", time.Minute)
 	if err != nil {
 		t.Fatalf("leader acquire: %v", err)
 	}
 	if !ok {
 		t.Fatal("leader did not acquire lock")
 	}
+	if epoch != 1 {
+		t.Fatalf("epoch = %d, want 1 for first acquisition", epoch)
+	}
 
-	ok, err = follower.TryAcquireLeadership(ctx, "doc-1", time.Minute)
+	okFollower, _, err := follower.TryAcquireLeadership(ctx, "doc-1", time.Minute)
 	if err != nil {
 		t.Fatalf("follower acquire: %v", err)
 	}
-	if ok {
+	if okFollower {
 		t.Fatal("follower unexpectedly acquired lock")
 	}
 
@@ -159,6 +162,45 @@ func TestRedisBusLeadershipLockIsExclusiveAndRenewable(t *testing.T) {
 	}
 	if !ok {
 		t.Fatal("leader did not renew lock")
+	}
+}
+
+func TestRedisBusEpochIncrementsAcrossLeadershipHandoffsAndSurvivesExpiry(t *testing.T) {
+	server := miniredis.RunT(t)
+
+	nodeA := newTestRedisBus(t, server)
+	defer nodeA.Close()
+	nodeB := newTestRedisBus(t, server)
+	defer nodeB.Close()
+
+	ctx := context.Background()
+
+	ok, epoch, err := nodeA.TryAcquireLeadership(ctx, "doc-1", time.Millisecond)
+	if err != nil || !ok {
+		t.Fatalf("node A acquire: ok=%v err=%v", ok, err)
+	}
+	if epoch != 1 {
+		t.Fatalf("epoch = %d, want 1", epoch)
+	}
+
+	// Simulate node A being paused/partitioned past the lease TTL: its key
+	// expires and node B takes over the same document.
+	server.FastForward(10 * time.Millisecond)
+
+	ok, epoch, err = nodeB.TryAcquireLeadership(ctx, "doc-1", time.Minute)
+	if err != nil || !ok {
+		t.Fatalf("node B acquire after expiry: ok=%v err=%v", ok, err)
+	}
+	if epoch != 2 {
+		t.Fatalf("epoch = %d, want 2 after handoff — must never repeat a past epoch", epoch)
+	}
+
+	current, err := nodeA.CurrentEpoch(ctx, "doc-1")
+	if err != nil {
+		t.Fatalf("current epoch: %v", err)
+	}
+	if current != 2 {
+		t.Fatalf("current epoch = %d, want 2 — node A must observe it has been superseded", current)
 	}
 }
 
@@ -175,7 +217,7 @@ func TestRedisBusGetLeaderReturnsEmptyWhenUnset(t *testing.T) {
 		t.Fatalf("leader = %q, want empty", leader)
 	}
 
-	acquired, err := bus.TryAcquireLeadership(context.Background(), "doc-1", time.Minute)
+	acquired, _, err := bus.TryAcquireLeadership(context.Background(), "doc-1", time.Minute)
 	if err != nil || !acquired {
 		t.Fatalf("acquire leadership: ok=%v err=%v", acquired, err)
 	}

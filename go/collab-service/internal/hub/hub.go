@@ -45,6 +45,16 @@ type Hub struct {
 	isLeader          bool
 	status            chan statusRequest
 
+	// leaderEpoch is the leadership term this node acquired when it last won
+	// the Redis lock (unchanged across renewals of the same term). Every
+	// commit it produces carries this epoch.
+	leaderEpoch int64
+	// highestSeenEpoch is the newest epoch this node has observed in any
+	// commit. Commits from an older epoch are dropped — they are the work
+	// of a leader that has since been superseded, most likely a node that
+	// paused (GC, CPU starvation) past the lease TTL and only now caught up.
+	highestSeenEpoch int64
+
 	// remoteUsers holds the last known roster reported by every other node
 	// editing this document, keyed by that node's ID. Merged with the local
 	// h.clients set, it forms the full cross-node presence list.
@@ -203,6 +213,24 @@ func (h *Hub) handleProposal(proposal replication.Proposal) {
 		return
 	}
 
+	// Fencing check: h.isLeader can be stale if this node was paused (GC,
+	// CPU starvation) past the lease TTL — another node may have already
+	// taken over. Verify our epoch is still the current one in Redis before
+	// advancing content on our own; otherwise step down without applying.
+	epochCtx, epochCancel := context.WithTimeout(context.Background(), replicationTimeout)
+	current, err := h.bus.CurrentEpoch(epochCtx, h.docID)
+	epochCancel()
+	if err != nil {
+		log.Printf("hub[%s]: epoch check failed: %v", h.docID, err)
+		return
+	}
+	if current != h.leaderEpoch {
+		log.Printf("hub[%s]: node %s fenced out (epoch %d superseded by %d), stepping down",
+			h.docID, h.bus.NodeID(), h.leaderEpoch, current)
+		h.isLeader = false
+		return
+	}
+
 	op := transformSince(fromReplicationOp(proposal.Op), h.ops, proposal.ClientVersion)
 	if op == nil {
 		return
@@ -217,6 +245,7 @@ func (h *Hub) handleProposal(proposal replication.Proposal) {
 		OriginClientID: proposal.OriginClientID,
 		UserID:         proposal.UserID,
 		ServerVersion:  h.version,
+		Epoch:          h.leaderEpoch,
 		Op:             toReplicationOp(op),
 	}
 
@@ -239,6 +268,16 @@ func (h *Hub) handleCommit(commit replication.Commit) {
 	if h.isLeader {
 		return
 	}
+	if commit.Epoch < h.highestSeenEpoch {
+		// A former leader that resumed after being fenced out — a newer
+		// leader has already taken over this document. Drop it so we never
+		// diverge from the current timeline.
+		log.Printf("hub[%s]: dropping commit from stale epoch %d (current %d)",
+			h.docID, commit.Epoch, h.highestSeenEpoch)
+		return
+	}
+	h.highestSeenEpoch = commit.Epoch
+
 	if commit.ServerVersion <= h.version {
 		return
 	}
@@ -371,24 +410,27 @@ func (h *Hub) ensureLeadership() {
 	ctx, cancel := context.WithTimeout(context.Background(), replicationTimeout)
 	defer cancel()
 
-	var (
-		ok  bool
-		err error
-	)
 	if h.isLeader {
-		ok, err = h.bus.RenewLeadership(ctx, h.docID, leadershipTTL)
-	} else {
-		ok, err = h.bus.TryAcquireLeadership(ctx, h.docID, leadershipTTL)
+		ok, err := h.bus.RenewLeadership(ctx, h.docID, leadershipTTL)
+		if err != nil {
+			log.Printf("hub[%s]: leadership error: %v", h.docID, err)
+			return
+		}
+		if !ok {
+			log.Printf("hub[%s]: node %s lost leadership", h.docID, h.bus.NodeID())
+		}
+		h.isLeader = ok
+		return
 	}
+
+	ok, epoch, err := h.bus.TryAcquireLeadership(ctx, h.docID, leadershipTTL)
 	if err != nil {
 		log.Printf("hub[%s]: leadership error: %v", h.docID, err)
 		return
 	}
-	if h.isLeader && !ok {
-		log.Printf("hub[%s]: node %s lost leadership", h.docID, h.bus.NodeID())
-	}
-	if ok && !h.isLeader {
-		log.Printf("hub[%s]: node %s became leader (failover)", h.docID, h.bus.NodeID())
+	if ok {
+		log.Printf("hub[%s]: node %s became leader (failover), epoch %d", h.docID, h.bus.NodeID(), epoch)
+		h.leaderEpoch = epoch
 	}
 	h.isLeader = ok
 }

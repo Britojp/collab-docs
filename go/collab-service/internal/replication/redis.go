@@ -149,12 +149,36 @@ func (b *RedisBus) PublishPresence(ctx context.Context, snapshot PresenceSnapsho
 }
 
 // TryAcquireLeadership attempts to become the single writer for a document.
-func (b *RedisBus) TryAcquireLeadership(ctx context.Context, docID string, ttl time.Duration) (bool, error) {
+// On success, it increments the document's epoch counter and returns the
+// new value — a fencing token this node must present with every commit it
+// produces during this leadership term.
+func (b *RedisBus) TryAcquireLeadership(ctx context.Context, docID string, ttl time.Duration) (bool, int64, error) {
 	ok, err := b.client.SetNX(ctx, leaderKey(docID), b.nodeID, ttl).Result()
 	if err != nil {
-		return false, fmt.Errorf("acquire leadership: %w", err)
+		return false, 0, fmt.Errorf("acquire leadership: %w", err)
 	}
-	return ok, nil
+	if !ok {
+		return false, 0, nil
+	}
+	epoch, err := b.client.Incr(ctx, epochKey(docID)).Result()
+	if err != nil {
+		return false, 0, fmt.Errorf("increment epoch: %w", err)
+	}
+	return true, epoch, nil
+}
+
+// CurrentEpoch returns the latest leadership epoch recorded for a document.
+// It never expires — every past and present leadership term for a document
+// draws from the same monotonically increasing counter.
+func (b *RedisBus) CurrentEpoch(ctx context.Context, docID string) (int64, error) {
+	epoch, err := b.client.Get(ctx, epochKey(docID)).Int64()
+	if err == redis.Nil {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("get epoch: %w", err)
+	}
+	return epoch, nil
 }
 
 // RenewLeadership extends the lock only if this node still owns it.
@@ -225,6 +249,10 @@ func presenceChannel(docID string) string {
 
 func leaderKey(docID string) string {
 	return leaderKeyPrefix + docID + ":leader"
+}
+
+func epochKey(docID string) string {
+	return leaderKeyPrefix + docID + ":epoch"
 }
 
 func newNodeID() string {
