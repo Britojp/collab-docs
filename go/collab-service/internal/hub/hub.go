@@ -44,21 +44,27 @@ type Hub struct {
 	cancelReplication context.CancelFunc
 	isLeader          bool
 	status            chan statusRequest
+
+	// remoteUsers holds the last known roster reported by every other node
+	// editing this document, keyed by that node's ID. Merged with the local
+	// h.clients set, it forms the full cross-node presence list.
+	remoteUsers map[string][]PresenceUser
 }
 
 func newHub(docID, content string, version int, pub *mq.Publisher, bus replication.Bus) *Hub {
 	h := &Hub{
-		docID:      docID,
-		clients:    make(map[*Client]bool),
-		content:    content,
-		version:    version,
-		ops:        make([]Op, 0, 64),
-		register:   make(chan *Client, 16),
-		unregister: make(chan *Client, 16),
-		incoming:   make(chan incomingMsg, 256),
-		pub:        pub,
-		bus:        bus,
-		status:     make(chan statusRequest, 4),
+		docID:       docID,
+		clients:     make(map[*Client]bool),
+		content:     content,
+		version:     version,
+		ops:         make([]Op, 0, 64),
+		register:    make(chan *Client, 16),
+		unregister:  make(chan *Client, 16),
+		incoming:    make(chan incomingMsg, 256),
+		pub:         pub,
+		bus:         bus,
+		status:      make(chan statusRequest, 4),
+		remoteUsers: make(map[string][]PresenceUser),
 	}
 
 	if bus != nil {
@@ -109,6 +115,9 @@ func (h *Hub) run() {
 
 		case <-ticker.C:
 			h.ensureLeadership()
+			// Heartbeat so nodes that started after this one's clients joined
+			// (or whose earlier snapshot was dropped by Pub/Sub) stay in sync.
+			h.publishPresenceSnapshot()
 
 		case req := <-h.status:
 			req.resp <- h.localSnapshot()
@@ -178,6 +187,14 @@ func (h *Hub) handleReplication(msg replication.Message) {
 		if msg.ResyncResponse != nil {
 			h.handleResyncResponse(*msg.ResyncResponse)
 		}
+	case replication.MessageKindCursor:
+		if msg.Cursor != nil {
+			h.handleCursorReplication(*msg.Cursor)
+		}
+	case replication.MessageKindPresence:
+		if msg.Presence != nil {
+			h.handlePresenceSnapshot(*msg.Presence)
+		}
 	}
 }
 
@@ -214,7 +231,12 @@ func (h *Hub) handleProposal(proposal replication.Proposal) {
 }
 
 func (h *Hub) handleCommit(commit replication.Commit) {
-	if h.bus != nil && commit.OriginNodeID == h.bus.NodeID() {
+	// The leader already applied this commit directly in handleProposal;
+	// skip re-applying the echo it receives back from its own Redis publish.
+	// A follower must always process the commit here, even when it was the
+	// node that originated the client's proposal — origin and leader are
+	// frequently different nodes.
+	if h.isLeader {
 		return
 	}
 	if commit.ServerVersion <= h.version {
@@ -399,20 +421,108 @@ type hubSnapshot struct {
 }
 
 func (h *Hub) handleCursor(c *Client, env ClientMessage) {
+	// Same-node peers get it immediately over the local broadcast; other
+	// nodes editing this document learn about it via Redis fan-out below.
 	h.broadcastExcept(c, ServerMessage{
 		Type:   "cursor",
 		UserID: c.userID,
 		Name:   c.name,
 		Pos:    env.Pos,
 	})
+
+	if h.bus == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), replicationTimeout)
+	defer cancel()
+	if err := h.bus.PublishCursor(ctx, replication.CursorUpdate{
+		DocID:          h.docID,
+		OriginNodeID:   h.bus.NodeID(),
+		OriginClientID: c.id,
+		UserID:         c.userID,
+		Name:           c.name,
+		Pos:            env.Pos,
+	}); err != nil {
+		log.Printf("hub[%s]: publish cursor failed: %v", h.docID, err)
+	}
 }
 
+// handleCursorReplication broadcasts a cursor update received from another
+// node to this node's local clients. Updates that originated here were
+// already broadcast locally by handleCursor, so they are skipped.
+func (h *Hub) handleCursorReplication(cu replication.CursorUpdate) {
+	if h.bus != nil && cu.OriginNodeID == h.bus.NodeID() {
+		return
+	}
+	h.broadcast(ServerMessage{
+		Type:   "cursor",
+		UserID: cu.UserID,
+		Name:   cu.Name,
+		Pos:    cu.Pos,
+	})
+}
+
+// broadcastPresence sends the merged (local + remote nodes) roster to this
+// node's clients and publishes this node's own roster so other nodes can
+// merge it into theirs.
 func (h *Hub) broadcastPresence() {
+	h.broadcastPresenceLocal()
+	h.publishPresenceSnapshot()
+}
+
+func (h *Hub) broadcastPresenceLocal() {
+	h.broadcast(ServerMessage{Type: "presence", Users: h.mergedPresenceUsers()})
+}
+
+func (h *Hub) localPresenceUsers() []PresenceUser {
 	users := make([]PresenceUser, 0, len(h.clients))
 	for c := range h.clients {
 		users = append(users, PresenceUser{ID: c.userID, Name: c.name})
 	}
-	h.broadcast(ServerMessage{Type: "presence", Users: users})
+	return users
+}
+
+func (h *Hub) mergedPresenceUsers() []PresenceUser {
+	users := h.localPresenceUsers()
+	for _, remote := range h.remoteUsers {
+		users = append(users, remote...)
+	}
+	return users
+}
+
+func (h *Hub) publishPresenceSnapshot() {
+	if h.bus == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), replicationTimeout)
+	defer cancel()
+	local := h.localPresenceUsers()
+	repUsers := make([]replication.PresenceUser, 0, len(local))
+	for _, u := range local {
+		repUsers = append(repUsers, replication.PresenceUser{ID: u.ID, Name: u.Name})
+	}
+	if err := h.bus.PublishPresence(ctx, replication.PresenceSnapshot{
+		DocID:        h.docID,
+		OriginNodeID: h.bus.NodeID(),
+		Users:        repUsers,
+	}); err != nil {
+		log.Printf("hub[%s]: publish presence failed: %v", h.docID, err)
+	}
+}
+
+// handlePresenceSnapshot merges another node's roster into this node's view
+// and re-broadcasts the merged list locally. Snapshots this node published
+// itself are skipped — they were already reflected via the local roster.
+func (h *Hub) handlePresenceSnapshot(snapshot replication.PresenceSnapshot) {
+	if h.bus != nil && snapshot.OriginNodeID == h.bus.NodeID() {
+		return
+	}
+	toPresenceUsers := make([]PresenceUser, 0, len(snapshot.Users))
+	for _, u := range snapshot.Users {
+		toPresenceUsers = append(toPresenceUsers, PresenceUser{ID: u.ID, Name: u.Name})
+	}
+	h.remoteUsers[snapshot.OriginNodeID] = toPresenceUsers
+	h.broadcastPresenceLocal()
 }
 
 func (h *Hub) broadcast(msg ServerMessage) {

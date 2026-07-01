@@ -12,7 +12,7 @@ import (
 
 func TestLeaderProposalCommitsOperationAndSkipsOriginClient(t *testing.T) {
 	bus := newFakeBus("node-a")
-	h := newHub("doc-1", "", nil, bus)
+	h := newHub("doc-1", "", 0, nil, bus)
 	h.isLeader = true
 
 	origin := newTestClient("client-1", "user-1")
@@ -57,7 +57,7 @@ func TestLeaderProposalCommitsOperationAndSkipsOriginClient(t *testing.T) {
 
 func TestFollowerAppliesCommitFromAnotherNode(t *testing.T) {
 	bus := newFakeBus("node-b")
-	h := newHub("doc-1", "", nil, bus)
+	h := newHub("doc-1", "", 0, nil, bus)
 
 	peer := newTestClient("client-2", "user-2")
 	h.clients[peer] = true
@@ -87,7 +87,7 @@ func TestFollowerAppliesCommitFromAnotherNode(t *testing.T) {
 
 func TestFollowerDetectsVersionGapAndRequestsResync(t *testing.T) {
 	bus := newFakeBus("node-b")
-	h := newHub("doc-1", "hello", nil, bus)
+	h := newHub("doc-1", "hello", 0, nil, bus)
 	h.version = 2
 
 	peer := newTestClient("client-2", "user-2")
@@ -126,7 +126,7 @@ func TestFollowerDetectsVersionGapAndRequestsResync(t *testing.T) {
 
 func TestLeaderHandlesResyncRequestAndPublishesResponse(t *testing.T) {
 	bus := newFakeBus("node-a")
-	h := newHub("doc-1", "world", nil, bus)
+	h := newHub("doc-1", "world", 0, nil, bus)
 	h.version = 7
 	h.isLeader = true
 
@@ -149,7 +149,7 @@ func TestLeaderHandlesResyncRequestAndPublishesResponse(t *testing.T) {
 
 func TestFollowerAppliesResyncResponseAndBroadcastsToClients(t *testing.T) {
 	bus := newFakeBus("node-b")
-	h := newHub("doc-1", "stale", nil, bus)
+	h := newHub("doc-1", "stale", 0, nil, bus)
 	h.version = 2
 
 	peer := newTestClient("client-2", "user-2")
@@ -174,10 +174,11 @@ func TestFollowerAppliesResyncResponseAndBroadcastsToClients(t *testing.T) {
 	}
 }
 
-func TestHubIgnoresOwnRedisCommitAfterLocalLeaderBroadcast(t *testing.T) {
+func TestLeaderIgnoresOwnRedisCommitAfterLocalBroadcast(t *testing.T) {
 	bus := newFakeBus("node-a")
-	h := newHub("doc-1", "a", nil, bus)
+	h := newHub("doc-1", "a", 0, nil, bus)
 	h.version = 1
+	h.isLeader = true
 
 	h.handleCommit(replication.Commit{
 		DocID:          "doc-1",
@@ -193,6 +194,162 @@ func TestHubIgnoresOwnRedisCommitAfterLocalLeaderBroadcast(t *testing.T) {
 	}
 	if h.version != 1 {
 		t.Fatalf("version = %d, want unchanged 1", h.version)
+	}
+}
+
+// Regression test: a client connected to a non-leader node must still have
+// its own commit applied and acked when it comes back from Redis. Origin
+// node and leader node are frequently different — matching OriginNodeID
+// against this node's own ID (instead of checking h.isLeader) caused the
+// origin node to silently drop its own client's commits forever, which
+// stalls that client's pending-op queue on the frontend.
+func TestOriginNonLeaderAppliesAndAcksOwnCommitFromLeader(t *testing.T) {
+	bus := newFakeBus("node-b")
+	h := newHub("doc-1", "a", 0, nil, bus)
+	h.version = 1
+	h.isLeader = false
+
+	origin := newTestClient("client-1", "user-1")
+	h.clients[origin] = true
+
+	h.handleCommit(replication.Commit{
+		DocID:          "doc-1",
+		OriginNodeID:   bus.NodeID(), // this node originated the proposal, but is not the leader
+		OriginClientID: origin.id,
+		UserID:         origin.userID,
+		ServerVersion:  2,
+		Op:             replication.Operation{Type: "insert", Pos: 1, Char: "z"},
+	})
+
+	if h.content != "az" {
+		t.Fatalf("content = %q, want %q", h.content, "az")
+	}
+	if h.version != 2 {
+		t.Fatalf("version = %d, want 2", h.version)
+	}
+
+	msg := receiveServerMessage(t, origin.send)
+	if msg.Type != "ack" || msg.ServerVersion != 2 {
+		t.Fatalf("expected ack{serverVersion:2} for origin client, got %#v", msg)
+	}
+}
+
+// Cursor and presence updates are node-local by default (plain WebSocket
+// broadcast). These tests cover the Redis fan-out added so users connected
+// to different go-collab nodes still see each other's cursor and presence.
+
+func TestHandleCursorBroadcastsLocallyAndPublishesToBus(t *testing.T) {
+	bus := newFakeBus("node-a")
+	h := newHub("doc-1", "", 0, nil, bus)
+
+	origin := newTestClient("client-1", "user-1")
+	peer := newTestClient("client-2", "user-2")
+	h.clients[origin] = true
+	h.clients[peer] = true
+
+	h.handleCursor(origin, ClientMessage{Pos: 5})
+
+	// Origin does not receive its own cursor position back.
+	assertNoMessage(t, origin.send)
+
+	msg := receiveServerMessage(t, peer.send)
+	if msg.Type != "cursor" || msg.UserID != "user-1" || msg.Pos != 5 {
+		t.Fatalf("unexpected peer message: %#v", msg)
+	}
+
+	bus.mu.Lock()
+	defer bus.mu.Unlock()
+	if len(bus.cursors) != 1 {
+		t.Fatalf("published cursors = %d, want 1", len(bus.cursors))
+	}
+	if bus.cursors[0].UserID != "user-1" || bus.cursors[0].Pos != 5 || bus.cursors[0].OriginNodeID != "node-a" {
+		t.Fatalf("published cursor = %#v", bus.cursors[0])
+	}
+}
+
+func TestCursorReplicationFromAnotherNodeIsBroadcastLocally(t *testing.T) {
+	bus := newFakeBus("node-b")
+	h := newHub("doc-1", "", 0, nil, bus)
+
+	peer := newTestClient("client-2", "user-2")
+	h.clients[peer] = true
+
+	h.handleCursorReplication(replication.CursorUpdate{
+		DocID:        "doc-1",
+		OriginNodeID: "node-a", // a different node than this one
+		UserID:       "user-1",
+		Name:         "user-1",
+		Pos:          9,
+	})
+
+	msg := receiveServerMessage(t, peer.send)
+	if msg.Type != "cursor" || msg.UserID != "user-1" || msg.Pos != 9 {
+		t.Fatalf("unexpected peer message: %#v", msg)
+	}
+}
+
+func TestCursorReplicationEchoFromOwnNodeIsIgnored(t *testing.T) {
+	bus := newFakeBus("node-a")
+	h := newHub("doc-1", "", 0, nil, bus)
+
+	peer := newTestClient("client-2", "user-2")
+	h.clients[peer] = true
+
+	// This node already broadcast the cursor locally in handleCursor;
+	// receiving its own publish echoed back via Redis must be a no-op.
+	h.handleCursorReplication(replication.CursorUpdate{
+		DocID:        "doc-1",
+		OriginNodeID: "node-a",
+		UserID:       "user-1",
+		Pos:          9,
+	})
+
+	assertNoMessage(t, peer.send)
+}
+
+func TestPresenceSnapshotFromAnotherNodeMergesIntoBroadcast(t *testing.T) {
+	bus := newFakeBus("node-b")
+	h := newHub("doc-1", "", 0, nil, bus)
+
+	local := newTestClient("client-2", "user-2")
+	h.clients[local] = true
+
+	h.handlePresenceSnapshot(replication.PresenceSnapshot{
+		DocID:        "doc-1",
+		OriginNodeID: "node-a",
+		Users:        []replication.PresenceUser{{ID: "user-1", Name: "user-1"}},
+	})
+
+	msg := receiveServerMessage(t, local.send)
+	if msg.Type != "presence" {
+		t.Fatalf("unexpected message type: %#v", msg)
+	}
+	ids := make(map[string]bool)
+	for _, u := range msg.Users {
+		ids[u.ID] = true
+	}
+	if !ids["user-1"] || !ids["user-2"] {
+		t.Fatalf("expected merged roster with user-1 and user-2, got %#v", msg.Users)
+	}
+}
+
+func TestBroadcastPresencePublishesLocalRosterToBus(t *testing.T) {
+	bus := newFakeBus("node-a")
+	h := newHub("doc-1", "", 0, nil, bus)
+
+	local := newTestClient("client-1", "user-1")
+	h.clients[local] = true
+
+	h.broadcastPresence()
+
+	bus.mu.Lock()
+	defer bus.mu.Unlock()
+	if len(bus.presenceSnaps) != 1 {
+		t.Fatalf("published presence snapshots = %d, want 1", len(bus.presenceSnaps))
+	}
+	got := bus.presenceSnaps[0]
+	if got.OriginNodeID != "node-a" || len(got.Users) != 1 || got.Users[0].ID != "user-1" {
+		t.Fatalf("published snapshot = %#v", got)
 	}
 }
 
@@ -236,6 +393,8 @@ type fakeBus struct {
 	proposals       []replication.Proposal
 	resyncRequests  []replication.ResyncRequest
 	resyncResponses []replication.ResyncResponse
+	cursors         []replication.CursorUpdate
+	presenceSnaps   []replication.PresenceSnapshot
 }
 
 func newFakeBus(nodeID string) *fakeBus {
@@ -276,6 +435,20 @@ func (b *fakeBus) PublishResyncResponse(_ context.Context, resp replication.Resy
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.resyncResponses = append(b.resyncResponses, resp)
+	return nil
+}
+
+func (b *fakeBus) PublishCursor(_ context.Context, cursor replication.CursorUpdate) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.cursors = append(b.cursors, cursor)
+	return nil
+}
+
+func (b *fakeBus) PublishPresence(_ context.Context, snapshot replication.PresenceSnapshot) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.presenceSnaps = append(b.presenceSnaps, snapshot)
 	return nil
 }
 

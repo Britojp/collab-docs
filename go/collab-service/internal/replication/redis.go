@@ -68,7 +68,7 @@ func (b *RedisBus) NodeID() string {
 // Subscribe listens to proposal and commit channels for a single document.
 // The returned close function must be called when the Hub is shut down.
 func (b *RedisBus) Subscribe(ctx context.Context, docID string) (<-chan Message, func() error, error) {
-	pubsub := b.client.Subscribe(ctx, proposalChannel(docID), commitChannel(docID))
+	pubsub := b.client.Subscribe(ctx, proposalChannel(docID), commitChannel(docID), cursorChannel(docID), presenceChannel(docID))
 	if _, err := pubsub.Receive(ctx); err != nil {
 		pubsub.Close()
 		return nil, nil, fmt.Errorf("subscribe doc %s: %w", docID, err)
@@ -129,6 +129,22 @@ func (b *RedisBus) PublishResyncResponse(ctx context.Context, resp ResyncRespons
 	return b.publish(ctx, commitChannel(resp.DocID), Message{
 		Kind:           MessageKindResyncResponse,
 		ResyncResponse: &resp,
+	})
+}
+
+// PublishCursor fans out a caret position update to every other node.
+func (b *RedisBus) PublishCursor(ctx context.Context, cursor CursorUpdate) error {
+	return b.publish(ctx, cursorChannel(cursor.DocID), Message{
+		Kind:   MessageKindCursor,
+		Cursor: &cursor,
+	})
+}
+
+// PublishPresence fans out this node's local roster for a document.
+func (b *RedisBus) PublishPresence(ctx context.Context, snapshot PresenceSnapshot) error {
+	return b.publish(ctx, presenceChannel(snapshot.DocID), Message{
+		Kind:     MessageKindPresence,
+		Presence: &snapshot,
 	})
 }
 
@@ -197,6 +213,14 @@ func proposalChannel(docID string) string {
 
 func commitChannel(docID string) string {
 	return leaderKeyPrefix + docID + ":commits"
+}
+
+func cursorChannel(docID string) string {
+	return leaderKeyPrefix + docID + ":cursors"
+}
+
+func presenceChannel(docID string) string {
+	return leaderKeyPrefix + docID + ":presence"
 }
 
 func leaderKey(docID string) string {

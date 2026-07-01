@@ -50,6 +50,84 @@ func TestRedisBusPublishesProposalToDocumentSubscribers(t *testing.T) {
 	}
 }
 
+func TestRedisBusPublishesCursorToDocumentSubscribers(t *testing.T) {
+	server := miniredis.RunT(t)
+
+	publisher := newTestRedisBus(t, server)
+	defer publisher.Close()
+	subscriber := newTestRedisBus(t, server)
+	defer subscriber.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	messages, closeSubscription, err := subscriber.Subscribe(ctx, "doc-1")
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	defer closeSubscription()
+
+	cursor := CursorUpdate{
+		DocID:          "doc-1",
+		OriginNodeID:   publisher.NodeID(),
+		OriginClientID: "client-1",
+		UserID:         "user-1",
+		Name:           "Ana",
+		Pos:            12,
+	}
+
+	if err := publisher.PublishCursor(ctx, cursor); err != nil {
+		t.Fatalf("publish cursor: %v", err)
+	}
+
+	msg := receiveReplicationMessage(t, messages)
+	if msg.Kind != MessageKindCursor {
+		t.Fatalf("kind = %q, want %q", msg.Kind, MessageKindCursor)
+	}
+	if msg.Cursor == nil || *msg.Cursor != cursor {
+		t.Fatalf("cursor = %#v, want %#v", msg.Cursor, cursor)
+	}
+}
+
+func TestRedisBusPublishesPresenceToDocumentSubscribers(t *testing.T) {
+	server := miniredis.RunT(t)
+
+	publisher := newTestRedisBus(t, server)
+	defer publisher.Close()
+	subscriber := newTestRedisBus(t, server)
+	defer subscriber.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	messages, closeSubscription, err := subscriber.Subscribe(ctx, "doc-1")
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	defer closeSubscription()
+
+	snapshot := PresenceSnapshot{
+		DocID:        "doc-1",
+		OriginNodeID: publisher.NodeID(),
+		Users:        []PresenceUser{{ID: "user-1", Name: "Ana"}},
+	}
+
+	if err := publisher.PublishPresence(ctx, snapshot); err != nil {
+		t.Fatalf("publish presence: %v", err)
+	}
+
+	msg := receiveReplicationMessage(t, messages)
+	if msg.Kind != MessageKindPresence {
+		t.Fatalf("kind = %q, want %q", msg.Kind, MessageKindPresence)
+	}
+	if msg.Presence == nil || msg.Presence.DocID != snapshot.DocID || msg.Presence.OriginNodeID != snapshot.OriginNodeID {
+		t.Fatalf("presence = %#v, want %#v", msg.Presence, snapshot)
+	}
+	if len(msg.Presence.Users) != 1 || msg.Presence.Users[0] != snapshot.Users[0] {
+		t.Fatalf("presence users = %#v, want %#v", msg.Presence.Users, snapshot.Users)
+	}
+}
+
 func TestRedisBusLeadershipLockIsExclusiveAndRenewable(t *testing.T) {
 	server := miniredis.RunT(t)
 

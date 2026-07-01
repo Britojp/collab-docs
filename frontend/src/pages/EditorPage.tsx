@@ -8,6 +8,10 @@ interface PresenceUser { id: string; name: string }
 
 interface RemoteCursor { pos: number; name: string }
 
+interface RemoteEdit { id: number; pos: number; userId: string }
+
+const HIGHLIGHT_DURATION_MS = 700
+
 const COLORS = ['#e74c3c', '#3498db', '#9b59b6', '#f39c12', '#1abc9c', '#e67e22']
 
 function avatarColor(userId: string) {
@@ -26,6 +30,8 @@ export default function EditorPage() {
   const [users, setUsers] = useState<PresenceUser[]>([])
   const [analytics, setAnalytics] = useState<DocumentAnalytics | null>(null)
   const [cursors, setCursors] = useState<Map<string, RemoteCursor>>(new Map())
+  const [highlights, setHighlights] = useState<RemoteEdit[]>([])
+  const highlightIdRef = useRef(0)
   const myId = localStorage.getItem('userId') ?? ''
 
   useEffect(() => { contentRef.current = content }, [content])
@@ -95,6 +101,17 @@ export default function EditorPage() {
           }
           return m
         })
+
+        // Keep existing highlight markers aligned, then flash a new one so
+        // users can see who inserted what — attributed by color, fading out.
+        setHighlights(prev => prev.map(h => ({ ...h, pos: adjustCursor(h.pos, msg.op!) })))
+        if (msg.op.type === 'insert' && msg.userId && msg.userId !== myId) {
+          const id = ++highlightIdRef.current
+          setHighlights(prev => [...prev, { id, pos: msg.op!.pos, userId: msg.userId }])
+          window.setTimeout(() => {
+            setHighlights(prev => prev.filter(h => h.id !== id))
+          }, HIGHLIGHT_DURATION_MS)
+        }
         break
       }
 
@@ -194,6 +211,11 @@ export default function EditorPage() {
                 onKeyUp={handleCursorMove}
                 placeholder="Pressione Enter e comece a escrever…"
                 autoFocus
+              />
+              <RemoteEditOverlay
+                taRef={textareaRef}
+                highlights={highlights}
+                content={content}
               />
               <CursorOverlay
                 taRef={textareaRef}
@@ -307,6 +329,71 @@ function CursorOverlay({ taRef, cursors, content }: CursorOverlayProps) {
             {p.name}
           </div>
         </div>
+      ))}
+    </div>
+  )
+}
+
+// ── Remote edit highlight overlay ──────────────────────────────────────────────
+//
+// Flashes a colored, fading rectangle over characters just inserted by another
+// user, so concurrent typing is visually attributed instead of just appearing.
+
+interface HighlightRect { id: number; top: number; left: number; width: number; color: string }
+
+function RemoteEditOverlay({ taRef, highlights, content }: {
+  taRef: React.RefObject<HTMLTextAreaElement>
+  highlights: RemoteEdit[]
+  content: string
+}) {
+  const [rects, setRects] = useState<HighlightRect[]>([])
+
+  useLayoutEffect(() => {
+    const ta = taRef.current
+    if (!ta || highlights.length === 0) { setRects([]); return }
+
+    const computed = highlights.flatMap(h => {
+      try {
+        const start = getCaretCoords(ta, h.pos)
+        const end = getCaretCoords(ta, h.pos + 1)
+        const sameLine = end.top === start.top && end.left > start.left
+        return [{
+          id: h.id,
+          top: start.top,
+          left: start.left,
+          width: sameLine ? end.left - start.left : 8,
+          color: avatarColor(h.userId),
+        }]
+      } catch {
+        return []
+      }
+    })
+    setRects(computed)
+  }, [highlights, content, taRef])
+
+  if (rects.length === 0) return null
+
+  return (
+    <div style={{
+      position: 'absolute',
+      inset: 0,
+      pointerEvents: 'none',
+      overflow: 'hidden',
+    }}>
+      {rects.map(r => (
+        <div
+          key={r.id}
+          style={{
+            position: 'absolute',
+            top: r.top,
+            left: r.left,
+            width: r.width,
+            height: '1.2em',
+            background: r.color,
+            borderRadius: 2,
+            animation: `collab-highlight-fade ${HIGHLIGHT_DURATION_MS}ms ease-out forwards`,
+          }}
+        />
       ))}
     </div>
   )

@@ -25,15 +25,15 @@ const exchange = "collab"
 //
 // JSON field names are intentionally kept compatible with the Java OpEvent record.
 type DocEvent struct {
-	EventID   string    `json:"eventId"`               // UUID v4 for idempotency
+	EventID   string    `json:"eventId"` // UUID v4 for idempotency
 	DocID     string    `json:"docId"`
 	UserID    string    `json:"userId"`
-	Version   int       `json:"version"`               // monotonically increasing per doc
+	Version   int       `json:"version"` // monotonically increasing per doc
 	Timestamp time.Time `json:"timestamp"`
-	Type      string    `json:"type"`                  // "INSERT" | "DELETE"
+	Type      string    `json:"type"` // "INSERT" | "DELETE"
 	Pos       int       `json:"pos"`
-	Character string    `json:"character,omitempty"`   // present only for INSERT
-	Content   string    `json:"content"`               // full document content after this op
+	Character string    `json:"character,omitempty"` // present only for INSERT
+	Content   string    `json:"content"`             // full document content after this op
 }
 
 // NewDocEvent builds a DocEvent with a generated EventID and current timestamp.

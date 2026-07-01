@@ -53,14 +53,44 @@ type ResyncResponse struct {
 	Version int    `json:"version"`
 }
 
+// CursorUpdate carries a client's caret position to every other Go instance
+// editing the same document. Unlike operations, cursor positions need no
+// leader ordering — last write wins — so they fan out directly.
+type CursorUpdate struct {
+	DocID          string `json:"docId"`
+	OriginNodeID   string `json:"originNodeId"`
+	OriginClientID string `json:"originClientId"`
+	UserID         string `json:"userId"`
+	Name           string `json:"name"`
+	Pos            int    `json:"pos"`
+}
+
+// PresenceUser is a user currently connected to a document Hub on some node.
+type PresenceUser struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// PresenceSnapshot is the roster of clients a single node currently has
+// connected for a document. Nodes exchange snapshots so every instance can
+// merge remote rosters with its own local clients into one presence list.
+type PresenceSnapshot struct {
+	DocID        string         `json:"docId"`
+	OriginNodeID string         `json:"originNodeId"`
+	Users        []PresenceUser `json:"users"`
+}
+
 // Message is delivered by a Bus subscription. A document Hub subscribes once
-// and receives proposals, commits and resync control messages for that document.
+// and receives proposals, commits, cursor/presence updates and resync control
+// messages for that document.
 type Message struct {
-	Kind           string          `json:"kind"`
-	Proposal       *Proposal       `json:"proposal,omitempty"`
-	Commit         *Commit         `json:"commit,omitempty"`
-	ResyncRequest  *ResyncRequest  `json:"resyncRequest,omitempty"`
-	ResyncResponse *ResyncResponse `json:"resyncResponse,omitempty"`
+	Kind           string            `json:"kind"`
+	Proposal       *Proposal         `json:"proposal,omitempty"`
+	Commit         *Commit           `json:"commit,omitempty"`
+	ResyncRequest  *ResyncRequest    `json:"resyncRequest,omitempty"`
+	ResyncResponse *ResyncResponse   `json:"resyncResponse,omitempty"`
+	Cursor         *CursorUpdate     `json:"cursor,omitempty"`
+	Presence       *PresenceSnapshot `json:"presence,omitempty"`
 }
 
 const (
@@ -74,6 +104,10 @@ const (
 	// MessageKindResyncResponse carries the full document state from the leader.
 	// It travels via the commits channel so every node receives it.
 	MessageKindResyncResponse = "resync_response"
+	// MessageKindCursor identifies a caret position update from any node.
+	MessageKindCursor = "cursor"
+	// MessageKindPresence identifies a node's roster snapshot for a document.
+	MessageKindPresence = "presence"
 )
 
 // Bus is the replication boundary used by the Hub Actor. Implementations may
@@ -90,6 +124,11 @@ type Bus interface {
 	// PublishResyncResponse broadcasts the authoritative document state to all nodes.
 	// Only the leader should call this.
 	PublishResyncResponse(ctx context.Context, resp ResyncResponse) error
+	// PublishCursor fans out a caret position update to every other node.
+	PublishCursor(ctx context.Context, cursor CursorUpdate) error
+	// PublishPresence fans out this node's local roster for a document so
+	// other nodes can merge it into their own presence broadcasts.
+	PublishPresence(ctx context.Context, snapshot PresenceSnapshot) error
 	TryAcquireLeadership(ctx context.Context, docID string, ttl time.Duration) (bool, error)
 	RenewLeadership(ctx context.Context, docID string, ttl time.Duration) (bool, error)
 	// GetLeader returns the node ID currently holding the document lock in Redis.
